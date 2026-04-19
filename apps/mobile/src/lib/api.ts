@@ -1,17 +1,22 @@
 import Constants from "expo-constants";
 import {
   ANON_SESSION_HEADER,
+  INVITE_TOKEN_HEADER,
   type AddCommentRequest,
   type AddCommentResponse,
   type AuthApiResponse,
+  type CreateInviteRequest,
+  type CreateInviteResponse,
   type FeedResponse,
   type GenerateItineraryRequest,
   type GenerateItineraryResponse,
   type ItineraryResponse,
   type ListCommentsResponse,
+  type ListInvitesResponse,
   type ListItinerariesResponse,
   type LoginRequest,
   type ProfileResponse,
+  type ResolveInviteResponse,
   type SignupRequest,
   type ToggleResponse,
   type UpdateItineraryRequest,
@@ -36,7 +41,11 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+interface RequestOpts {
+  inviteToken?: string | null;
+}
+
+async function request<T>(path: string, init: RequestInit = {}, opts: RequestOpts = {}): Promise<T> {
   const headers = new Headers(init.headers);
   if (!headers.has("content-type") && init.body) headers.set("content-type", "application/json");
   const token = await getItem(TOKEN_KEY);
@@ -45,6 +54,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const anon = await getAnonSessionId();
     headers.set(ANON_SESSION_HEADER, anon);
   }
+  if (opts.inviteToken) headers.set(INVITE_TOKEN_HEADER, opts.inviteToken);
 
   const res = await fetch(`${BASE_URL}${path}`, { ...init, headers });
   const text = await res.text();
@@ -90,8 +100,8 @@ export const api = {
   listItineraries() {
     return request<ListItinerariesResponse>("/api/itineraries");
   },
-  getItinerary(id: string) {
-    return request<ItineraryResponse>(`/api/itineraries/${id}`);
+  getItinerary(id: string, inviteToken?: string | null) {
+    return request<ItineraryResponse>(`/api/itineraries/${id}`, {}, { inviteToken });
   },
   updateItinerary(id: string, body: UpdateItineraryRequest) {
     return request<ItineraryResponse>(`/api/itineraries/${id}`, {
@@ -114,15 +124,20 @@ export const api = {
   toggleSave(id: string) {
     return request<ToggleResponse>(`/api/itineraries/${id}/save`, { method: "POST" });
   },
-  listComments(id: string, cursor?: string | null) {
+  listComments(id: string, cursor?: string | null, inviteToken?: string | null) {
     const q = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
-    return request<ListCommentsResponse>(`/api/itineraries/${id}/comments${q}`);
+    return request<ListCommentsResponse>(
+      `/api/itineraries/${id}/comments${q}`,
+      {},
+      { inviteToken },
+    );
   },
-  addComment(id: string, body: AddCommentRequest) {
-    return request<AddCommentResponse>(`/api/itineraries/${id}/comments`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
+  addComment(id: string, body: AddCommentRequest, inviteToken?: string | null) {
+    return request<AddCommentResponse>(
+      `/api/itineraries/${id}/comments`,
+      { method: "POST", body: JSON.stringify(body) },
+      { inviteToken },
+    );
   },
   deleteComment(commentId: string) {
     return request<null>(`/api/itineraries/comments/${commentId}`, { method: "DELETE" });
@@ -132,5 +147,22 @@ export const api = {
   },
   profile(username: string) {
     return request<ProfileResponse>(`/api/users/${encodeURIComponent(username)}`);
+  },
+
+  // Phase 3: invites
+  createInvite(itineraryId: string, body: CreateInviteRequest = {}) {
+    return request<CreateInviteResponse>(`/api/itineraries/${itineraryId}/invites`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  },
+  listInvites(itineraryId: string) {
+    return request<ListInvitesResponse>(`/api/itineraries/${itineraryId}/invites`);
+  },
+  revokeInvite(inviteId: string) {
+    return request<null>(`/api/itineraries/invites/${inviteId}`, { method: "DELETE" });
+  },
+  resolveInvite(token: string) {
+    return request<ResolveInviteResponse>(`/api/invites/${encodeURIComponent(token)}`);
   },
 };

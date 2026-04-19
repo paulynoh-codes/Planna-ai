@@ -25,6 +25,7 @@ export default function RootLayout() {
           <Stack.Screen name="(auth)/login" options={{ title: "Log in" }} />
           <Stack.Screen name="itinerary/[id]" options={{ title: "Trip" }} />
           <Stack.Screen name="u/[username]" options={{ title: "Profile" }} />
+          <Stack.Screen name="i/[token]" options={{ title: "Invite" }} />
         </Stack>
       </AuthProvider>
     </SafeAreaProvider>

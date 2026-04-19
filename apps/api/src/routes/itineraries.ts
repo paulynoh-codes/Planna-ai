@@ -1,15 +1,19 @@
 import { Router } from "express";
 import { Types } from "mongoose";
+import { randomBytes } from "node:crypto";
 import {
   generateItinerarySchema,
   updateItinerarySchema,
   addCommentSchema,
+  createInviteSchema,
   ANON_SESSION_HEADER,
+  INVITE_TOKEN_HEADER,
 } from "@planna/shared";
 import { ItineraryModel, isValidObjectId, toPublicItinerary } from "../models/Itinerary.js";
 import { LikeModel } from "../models/Like.js";
 import { SaveModel } from "../models/Save.js";
 import { CommentModel, toPublicComment } from "../models/Comment.js";
+import { InviteModel, toPublicInvite } from "../models/Invite.js";
 import { UserModel } from "../models/User.js";
 import { getAiClient } from "../services/ai.js";
 import { enrichItineraries, enrichItinerary } from "../services/enrich.js";
@@ -73,15 +77,8 @@ itinerariesRouter.get("/", requireAuth, async (req: AuthenticatedRequest, res, n
 itinerariesRouter.get("/:id", optionalAuth, async (req: AuthenticatedRequest, res, next) => {
   try {
     const id = req.params.id;
-    if (typeof id !== "string" || !isValidObjectId(id))
-      throw new HttpError(404, "not_found", "Itinerary not found");
-    const doc = await ItineraryModel.findById(id);
-    if (!doc) throw new HttpError(404, "not_found", "Itinerary not found");
-
-    const isOwner = req.userId && doc.ownerId && doc.ownerId.toString() === req.userId;
-    if (!isOwner && doc.visibility !== "public") {
-      throw new HttpError(404, "not_found", "Itinerary not found");
-    }
+    if (typeof id !== "string") throw new HttpError(404, "not_found", "Itinerary not found");
+    const doc = await loadAccessible(id, req.userId ?? null, readInviteToken(req));
     const itinerary = await enrichItinerary(doc, req.userId ?? null);
     res.json({ itinerary });
   } catch (err) {
@@ -147,6 +144,7 @@ itinerariesRouter.delete("/:id", requireAuth, async (req: AuthenticatedRequest, 
       LikeModel.deleteMany({ itineraryId: doc._id }),
       SaveModel.deleteMany({ itineraryId: doc._id }),
       CommentModel.deleteMany({ itineraryId: doc._id }),
+      InviteModel.deleteMany({ itineraryId: doc._id }),
     ]);
     res.status(204).end();
   } catch (err) {
@@ -154,21 +152,38 @@ itinerariesRouter.delete("/:id", requireAuth, async (req: AuthenticatedRequest, 
   }
 });
 
-async function loadPublicOrOwn(id: string, viewerId: string | null | undefined) {
+function readInviteToken(req: AuthenticatedRequest): string | null {
+  const fromHeader = req.header(INVITE_TOKEN_HEADER);
+  if (fromHeader) return fromHeader;
+  const q = req.query.invite;
+  return typeof q === "string" && q.length > 0 ? q : null;
+}
+
+async function loadAccessible(
+  id: string,
+  viewerId: string | null | undefined,
+  inviteToken: string | null,
+) {
   if (!isValidObjectId(id)) throw new HttpError(404, "not_found", "Itinerary not found");
   const doc = await ItineraryModel.findById(id);
   if (!doc) throw new HttpError(404, "not_found", "Itinerary not found");
-  const isOwner = viewerId && doc.ownerId && doc.ownerId.toString() === viewerId;
-  if (!isOwner && doc.visibility !== "public")
-    throw new HttpError(404, "not_found", "Itinerary not found");
-  return doc;
+
+  const isOwner = !!viewerId && !!doc.ownerId && doc.ownerId.toString() === viewerId;
+  if (isOwner) return doc;
+  if (doc.visibility === "public") return doc;
+
+  if (inviteToken) {
+    const invite = await InviteModel.findOne({ token: inviteToken, revokedAt: null });
+    if (invite && invite.itineraryId.toString() === doc._id.toString()) return doc;
+  }
+  throw new HttpError(404, "not_found", "Itinerary not found");
 }
 
 itinerariesRouter.post("/:id/like", requireAuth, async (req: AuthenticatedRequest, res, next) => {
   try {
     const id = req.params.id;
     if (typeof id !== "string") throw new HttpError(404, "not_found", "Itinerary not found");
-    const doc = await loadPublicOrOwn(id, req.userId);
+    const doc = await loadAccessible(id, req.userId, null);
 
     const existing = await LikeModel.findOne({ itineraryId: doc._id, userId: req.userId });
     let active: boolean;
@@ -196,7 +211,7 @@ itinerariesRouter.post("/:id/save", requireAuth, async (req: AuthenticatedReques
   try {
     const id = req.params.id;
     if (typeof id !== "string") throw new HttpError(404, "not_found", "Itinerary not found");
-    const doc = await loadPublicOrOwn(id, req.userId);
+    const doc = await loadAccessible(id, req.userId, null);
 
     const existing = await SaveModel.findOne({ itineraryId: doc._id, userId: req.userId });
     let active: boolean;
@@ -224,7 +239,7 @@ itinerariesRouter.get("/:id/comments", optionalAuth, async (req: AuthenticatedRe
   try {
     const id = req.params.id;
     if (typeof id !== "string") throw new HttpError(404, "not_found", "Itinerary not found");
-    const doc = await loadPublicOrOwn(id, req.userId);
+    const doc = await loadAccessible(id, req.userId ?? null, readInviteToken(req));
 
     const limit = Math.min(Number(req.query.limit ?? 50), 100);
     const cursor = typeof req.query.cursor === "string" ? req.query.cursor : null;
@@ -264,7 +279,7 @@ itinerariesRouter.post(
     try {
       const id = req.params.id;
       if (typeof id !== "string") throw new HttpError(404, "not_found", "Itinerary not found");
-      const doc = await loadPublicOrOwn(id, req.userId);
+      const doc = await loadAccessible(id, req.userId, readInviteToken(req));
       const input = addCommentSchema.parse(req.body);
 
       const comment = await CommentModel.create({
@@ -310,6 +325,87 @@ itinerariesRouter.delete(
 
       await comment.deleteOne();
       await ItineraryModel.updateOne({ _id: comment.itineraryId }, { $inc: { commentCount: -1 } });
+      res.status(204).end();
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+function generateInviteToken(): string {
+  return randomBytes(16).toString("base64url");
+}
+
+async function requireOwnerItinerary(id: string, userId: string) {
+  if (!isValidObjectId(id)) throw new HttpError(404, "not_found", "Itinerary not found");
+  const doc = await ItineraryModel.findById(id).select("ownerId");
+  if (!doc) throw new HttpError(404, "not_found", "Itinerary not found");
+  if (!doc.ownerId || doc.ownerId.toString() !== userId)
+    throw new HttpError(403, "forbidden", "Not your itinerary");
+  return doc;
+}
+
+itinerariesRouter.post(
+  "/:id/invites",
+  requireAuth,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const id = req.params.id;
+      if (typeof id !== "string") throw new HttpError(404, "not_found", "Itinerary not found");
+      await requireOwnerItinerary(id, req.userId!);
+      const input = createInviteSchema.parse(req.body ?? {});
+
+      const invite = await InviteModel.create({
+        itineraryId: new Types.ObjectId(id),
+        token: generateInviteToken(),
+        createdBy: new Types.ObjectId(req.userId),
+        label: input.label ?? "",
+      });
+      res.status(201).json({ invite: toPublicInvite(invite) });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+itinerariesRouter.get(
+  "/:id/invites",
+  requireAuth,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const id = req.params.id;
+      if (typeof id !== "string") throw new HttpError(404, "not_found", "Itinerary not found");
+      await requireOwnerItinerary(id, req.userId!);
+
+      const invites = await InviteModel.find({ itineraryId: id, revokedAt: null })
+        .sort({ createdAt: -1 })
+        .limit(50);
+      res.json({ invites: invites.map(toPublicInvite) });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+itinerariesRouter.delete(
+  "/invites/:inviteId",
+  requireAuth,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const inviteId = req.params.inviteId;
+      if (typeof inviteId !== "string" || !isValidObjectId(inviteId))
+        throw new HttpError(404, "not_found", "Invite not found");
+      const invite = await InviteModel.findById(inviteId);
+      if (!invite) throw new HttpError(404, "not_found", "Invite not found");
+
+      const itinerary = await ItineraryModel.findById(invite.itineraryId).select("ownerId");
+      if (!itinerary?.ownerId || itinerary.ownerId.toString() !== req.userId)
+        throw new HttpError(403, "forbidden", "Not your invite");
+
+      if (!invite.revokedAt) {
+        invite.revokedAt = new Date();
+        await invite.save();
+      }
       res.status(204).end();
     } catch (err) {
       next(err);

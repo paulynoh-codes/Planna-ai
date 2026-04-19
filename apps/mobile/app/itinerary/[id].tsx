@@ -1,27 +1,35 @@
 import { router, useLocalSearchParams } from "expo-router";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
+  Platform,
   Pressable,
+  Share,
   StyleSheet,
   Switch,
   Text,
   TextInput,
   View,
 } from "react-native";
-import type { Comment, Itinerary } from "@planna/shared";
+import type { Comment, Invite, Itinerary } from "@planna/shared";
 import { Button } from "../../src/components/Button";
 import { Field } from "../../src/components/Field";
 import { ItineraryView } from "../../src/components/ItineraryView";
 import { Screen } from "../../src/components/Screen";
 import { api, ApiError } from "../../src/lib/api";
 import { useAuth } from "../../src/lib/auth";
+import { clearInvite, getInviteToken } from "../../src/lib/invites";
 import { colors, radius, spacing, type } from "../../src/theme";
+
+const WEB_BASE_URL =
+  process.env.EXPO_PUBLIC_WEB_URL ??
+  (typeof window !== "undefined" && window.location?.origin ? window.location.origin : "http://localhost:19006");
 
 export default function ItineraryDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const { user } = useAuth();
   const [itinerary, setItinerary] = useState<Itinerary | null>(null);
+  const [inviteToken, setInviteToken] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -32,6 +40,11 @@ export default function ItineraryDetailScreen() {
   const [commentText, setCommentText] = useState("");
   const [commentPosting, setCommentPosting] = useState(false);
 
+  const [invites, setInvites] = useState<Invite[] | null>(null);
+  const [inviteLabel, setInviteLabel] = useState("");
+  const [creatingInvite, setCreatingInvite] = useState(false);
+  const [copiedToken, setCopiedToken] = useState<string | null>(null);
+
   const isOwner = !!itinerary && !!user && itinerary.ownerId === user.id;
 
   useEffect(() => {
@@ -39,11 +52,18 @@ export default function ItineraryDetailScreen() {
     let cancelled = false;
     setError(null);
     (async () => {
+      const storedToken = await getInviteToken(id);
+      if (cancelled) return;
+      setInviteToken(storedToken);
       try {
-        const res = await api.getItinerary(id);
-        if (!cancelled) {
-          setItinerary(res.itinerary);
-          setTitle(res.itinerary.title);
+        const res = await api.getItinerary(id, storedToken);
+        if (cancelled) return;
+        setItinerary(res.itinerary);
+        setTitle(res.itinerary.title);
+        if (storedToken && (res.itinerary.ownerId === null || res.itinerary.visibility === "public")) {
+          // No longer need the stored token
+          await clearInvite(id);
+          setInviteToken(null);
         }
       } catch (err) {
         if (!cancelled) setError(err instanceof ApiError ? err.message : "Could not load trip.");
@@ -59,7 +79,7 @@ export default function ItineraryDetailScreen() {
     let cancelled = false;
     (async () => {
       try {
-        const res = await api.listComments(itinerary.id);
+        const res = await api.listComments(itinerary.id, null, inviteToken);
         if (!cancelled) {
           setComments(res.comments);
           setCommentsCursor(res.nextCursor);
@@ -71,7 +91,21 @@ export default function ItineraryDetailScreen() {
     return () => {
       cancelled = true;
     };
-  }, [itinerary?.id]);
+  }, [itinerary?.id, inviteToken]);
+
+  const refreshInvites = useCallback(async () => {
+    if (!itinerary || !isOwner) return;
+    try {
+      const res = await api.listInvites(itinerary.id);
+      setInvites(res.invites);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not load invites.");
+    }
+  }, [itinerary, isOwner]);
+
+  useEffect(() => {
+    if (isOwner) refreshInvites();
+  }, [isOwner, refreshInvites]);
 
   async function handleTitleSave() {
     if (!itinerary || title.trim() === itinerary.title) return;
@@ -145,7 +179,7 @@ export default function ItineraryDetailScreen() {
     }
     setCommentPosting(true);
     try {
-      const res = await api.addComment(itinerary.id, { text: commentText.trim() });
+      const res = await api.addComment(itinerary.id, { text: commentText.trim() }, inviteToken);
       setComments((prev) => [res.comment, ...(prev ?? [])]);
       setItinerary({ ...itinerary, commentCount: itinerary.commentCount + 1 });
       setCommentText("");
@@ -170,11 +204,50 @@ export default function ItineraryDetailScreen() {
   async function loadMoreComments() {
     if (!itinerary || !commentsCursor) return;
     try {
-      const res = await api.listComments(itinerary.id, commentsCursor);
+      const res = await api.listComments(itinerary.id, commentsCursor, inviteToken);
       setComments((prev) => [...(prev ?? []), ...res.comments]);
       setCommentsCursor(res.nextCursor);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not load more comments.");
+    }
+  }
+
+  async function handleCreateInvite() {
+    if (!itinerary) return;
+    setCreatingInvite(true);
+    try {
+      const res = await api.createInvite(itinerary.id, { label: inviteLabel.trim() || undefined });
+      setInvites((prev) => [res.invite, ...(prev ?? [])]);
+      setInviteLabel("");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not create invite.");
+    } finally {
+      setCreatingInvite(false);
+    }
+  }
+
+  async function handleRevokeInvite(inviteId: string) {
+    try {
+      await api.revokeInvite(inviteId);
+      setInvites((prev) => (prev ?? []).filter((i) => i.id !== inviteId));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not revoke invite.");
+    }
+  }
+
+  async function handleShareInvite(url: string, token: string) {
+    try {
+      if (Platform.OS === "web") {
+        if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(url);
+          setCopiedToken(token);
+          setTimeout(() => setCopiedToken((t) => (t === token ? null : t)), 2000);
+          return;
+        }
+      }
+      await Share.share({ message: url, url });
+    } catch {
+      // User cancelled share — ignore.
     }
   }
 
@@ -241,6 +314,63 @@ export default function ItineraryDetailScreen() {
         />
         <EngagementButton label={`▢ ${itinerary.commentCount}`} active={false} onPress={() => {}} />
       </View>
+
+      {isOwner ? (
+        <View style={styles.invitesCard}>
+          <Text style={styles.sectionTitle}>Invite links</Text>
+          <Text style={styles.meta}>
+            Share a link with friends so they can view and comment — even if this trip is private.
+          </Text>
+          <View style={styles.inviteCompose}>
+            <TextInput
+              value={inviteLabel}
+              onChangeText={setInviteLabel}
+              placeholder="Label (optional) — e.g. honeymoon crew"
+              placeholderTextColor={colors.inkMuted}
+              style={styles.inviteInput}
+              maxLength={40}
+            />
+            <Button
+              label="Create invite link"
+              onPress={handleCreateInvite}
+              loading={creatingInvite}
+            />
+          </View>
+
+          {invites === null ? (
+            <ActivityIndicator color={colors.ink} />
+          ) : invites.length === 0 ? (
+            <Text style={styles.meta}>No invites yet.</Text>
+          ) : (
+            invites.map((invite) => {
+              const url = `${WEB_BASE_URL}/i/${invite.token}`;
+              return (
+                <View key={invite.id} style={styles.invite}>
+                  <Text style={styles.inviteLabel}>{invite.label || "Untitled"}</Text>
+                  <TextInput
+                    value={url}
+                    editable={false}
+                    selectTextOnFocus
+                    style={styles.inviteUrl}
+                  />
+                  <View style={styles.inviteActions}>
+                    <Button
+                      label={copiedToken === invite.token ? "Copied!" : "Share / copy"}
+                      variant="secondary"
+                      onPress={() => handleShareInvite(url, invite.token)}
+                    />
+                    <Button
+                      label="Revoke"
+                      variant="ghost"
+                      onPress={() => handleRevokeInvite(invite.id)}
+                    />
+                  </View>
+                </View>
+              );
+            })
+          )}
+        </View>
+      ) : null}
 
       <View style={{ gap: spacing.md }}>
         <Text style={styles.sectionTitle}>Comments</Text>
@@ -347,6 +477,45 @@ const styles = StyleSheet.create({
   engagementLabel: { ...type.body, color: colors.ink },
   engagementLabelActive: { color: colors.accent, fontWeight: "600" },
   sectionTitle: { ...type.h2, color: colors.ink },
+  invitesCard: {
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: radius.lg,
+    padding: spacing.lg,
+    gap: spacing.md,
+  },
+  inviteCompose: { gap: spacing.sm },
+  inviteInput: {
+    ...type.body,
+    backgroundColor: colors.bg,
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.md,
+    color: colors.ink,
+  },
+  invite: {
+    borderTopWidth: 1,
+    borderTopColor: colors.line,
+    paddingTop: spacing.md,
+    gap: spacing.sm,
+  },
+  inviteLabel: { ...type.h2, color: colors.ink },
+  inviteUrl: {
+    ...type.body,
+    backgroundColor: colors.bg,
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: radius.sm,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
+    color: colors.ink,
+    fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
+    fontSize: 13,
+  },
+  inviteActions: { flexDirection: "row", gap: spacing.sm, flexWrap: "wrap" },
   commentCompose: { gap: spacing.sm },
   commentInput: {
     ...type.body,

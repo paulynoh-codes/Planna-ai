@@ -8,6 +8,7 @@ import { itinerariesRouter } from "./routes/itineraries.js";
 import { feedRouter } from "./routes/feed.js";
 import { usersRouter } from "./routes/users.js";
 import { savesRouter } from "./routes/saves.js";
+import { invitesRouter } from "./routes/invites.js";
 import { errorHandler, notFoundHandler } from "./middleware/error.js";
 
 export function createApp() {
@@ -30,6 +31,7 @@ export function createApp() {
   app.use("/api/feed", feedRouter);
   app.use("/api/users", usersRouter);
   app.use("/api/saves", savesRouter);
+  app.use("/api/invites", invitesRouter);
 
   app.use(notFoundHandler);
   app.use(errorHandler);
