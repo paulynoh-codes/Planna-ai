@@ -38,6 +38,7 @@ export type AuthApiResponse = AuthResponse;
 
 export interface ListItinerariesResponse {
   itineraries: Itinerary[];
+  nextCursor: string | null;
 }
 
 export interface ItineraryResponse {

@@ -21,7 +21,7 @@ savesRouter.get("/", requireAuth, async (req: AuthenticatedRequest, res, next) =
       .filter((d): d is NonNullable<typeof d> => Boolean(d));
 
     const itineraries = await enrichItineraries(ordered, req.userId!);
-    res.json({ itineraries });
+    res.json({ itineraries, nextCursor: null });
   } catch (err) {
     next(err);
   }

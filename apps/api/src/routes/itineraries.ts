@@ -21,11 +21,13 @@ import { getAiClient } from "../services/ai.js";
 import { enrichItineraries, enrichItinerary } from "../services/enrich.js";
 import { HttpError } from "../middleware/error.js";
 import { optionalAuth, requireAuth, type AuthenticatedRequest } from "../middleware/auth.js";
+import { generateRateLimiter, swapRateLimiter } from "../middleware/rateLimit.js";
+import { getParam } from "../middleware/params.js";
 import { logger } from "../logger.js";
 
 export const itinerariesRouter = Router();
 
-itinerariesRouter.post("/generate", optionalAuth, async (req: AuthenticatedRequest, res, next) => {
+itinerariesRouter.post("/generate", optionalAuth, generateRateLimiter, async (req: AuthenticatedRequest, res, next) => {
   try {
     const input = generateItinerarySchema.parse(req.body);
     const anonSession = req.header(ANON_SESSION_HEADER);
@@ -68,9 +70,20 @@ itinerariesRouter.post("/generate", optionalAuth, async (req: AuthenticatedReque
 
 itinerariesRouter.get("/", requireAuth, async (req: AuthenticatedRequest, res, next) => {
   try {
-    const docs = await ItineraryModel.find({ ownerId: req.userId }).sort({ updatedAt: -1 }).limit(100);
-    const itineraries = await enrichItineraries(docs, req.userId!);
-    res.json({ itineraries });
+    const limit = Math.min(Number(req.query.limit ?? 50), 100);
+    const cursor = typeof req.query.cursor === "string" ? req.query.cursor : null;
+    const query: Record<string, unknown> = { ownerId: req.userId };
+    if (cursor && isValidObjectId(cursor)) {
+      query._id = { $lt: new Types.ObjectId(cursor) };
+    }
+    const docs = await ItineraryModel.find(query).sort({ _id: -1 }).limit(limit + 1);
+    const hasMore = docs.length > limit;
+    const slice = hasMore ? docs.slice(0, limit) : docs;
+    const itineraries = await enrichItineraries(slice, req.userId!);
+    res.json({
+      itineraries,
+      nextCursor: hasMore ? slice[slice.length - 1]!._id.toString() : null,
+    });
   } catch (err) {
     next(err);
   }
@@ -78,8 +91,7 @@ itinerariesRouter.get("/", requireAuth, async (req: AuthenticatedRequest, res, n
 
 itinerariesRouter.get("/:id", optionalAuth, async (req: AuthenticatedRequest, res, next) => {
   try {
-    const id = req.params.id;
-    if (typeof id !== "string") throw new HttpError(404, "not_found", "Itinerary not found");
+    const id = getParam(req, "id", "Itinerary not found");
     const doc = await loadAccessible(id, req.userId ?? null, readInviteToken(req));
     const itinerary = await enrichItinerary(doc, req.userId ?? null);
     res.json({ itinerary });
@@ -90,9 +102,8 @@ itinerariesRouter.get("/:id", optionalAuth, async (req: AuthenticatedRequest, re
 
 itinerariesRouter.patch("/:id", requireAuth, async (req: AuthenticatedRequest, res, next) => {
   try {
-    const id = req.params.id;
-    if (typeof id !== "string" || !isValidObjectId(id))
-      throw new HttpError(404, "not_found", "Itinerary not found");
+    const id = getParam(req, "id", "Itinerary not found");
+    if (!isValidObjectId(id)) throw new HttpError(404, "not_found", "Itinerary not found");
     const input = updateItinerarySchema.parse(req.body);
     const doc = await ItineraryModel.findById(id);
     if (!doc) throw new HttpError(404, "not_found", "Itinerary not found");
@@ -133,21 +144,20 @@ itinerariesRouter.patch("/:id", requireAuth, async (req: AuthenticatedRequest, r
 
 itinerariesRouter.delete("/:id", requireAuth, async (req: AuthenticatedRequest, res, next) => {
   try {
-    const id = req.params.id;
-    if (typeof id !== "string" || !isValidObjectId(id))
-      throw new HttpError(404, "not_found", "Itinerary not found");
+    const id = getParam(req, "id", "Itinerary not found");
+    if (!isValidObjectId(id)) throw new HttpError(404, "not_found", "Itinerary not found");
     const doc = await ItineraryModel.findById(id);
     if (!doc) throw new HttpError(404, "not_found", "Itinerary not found");
     if (!doc.ownerId || doc.ownerId.toString() !== req.userId) {
       throw new HttpError(403, "forbidden", "Not your itinerary");
     }
     await Promise.all([
-      doc.deleteOne(),
       LikeModel.deleteMany({ itineraryId: doc._id }),
       SaveModel.deleteMany({ itineraryId: doc._id }),
       CommentModel.deleteMany({ itineraryId: doc._id }),
       InviteModel.deleteMany({ itineraryId: doc._id }),
     ]);
+    await doc.deleteOne();
     res.status(204).end();
   } catch (err) {
     next(err);
@@ -183,15 +193,16 @@ async function loadAccessible(
 
 itinerariesRouter.post("/:id/like", requireAuth, async (req: AuthenticatedRequest, res, next) => {
   try {
-    const id = req.params.id;
-    if (typeof id !== "string") throw new HttpError(404, "not_found", "Itinerary not found");
+    const id = getParam(req, "id", "Itinerary not found");
     const doc = await loadAccessible(id, req.userId, null);
 
     const existing = await LikeModel.findOne({ itineraryId: doc._id, userId: req.userId });
     let active: boolean;
     if (existing) {
-      await existing.deleteOne();
-      await ItineraryModel.updateOne({ _id: doc._id }, { $inc: { likeCount: -1 } });
+      const result = await LikeModel.deleteOne({ itineraryId: doc._id, userId: req.userId });
+      if (result.deletedCount > 0) {
+        await ItineraryModel.updateOne({ _id: doc._id }, { $inc: { likeCount: -1 } });
+      }
       active = false;
     } else {
       try {
@@ -211,15 +222,16 @@ itinerariesRouter.post("/:id/like", requireAuth, async (req: AuthenticatedReques
 
 itinerariesRouter.post("/:id/save", requireAuth, async (req: AuthenticatedRequest, res, next) => {
   try {
-    const id = req.params.id;
-    if (typeof id !== "string") throw new HttpError(404, "not_found", "Itinerary not found");
+    const id = getParam(req, "id", "Itinerary not found");
     const doc = await loadAccessible(id, req.userId, null);
 
     const existing = await SaveModel.findOne({ itineraryId: doc._id, userId: req.userId });
     let active: boolean;
     if (existing) {
-      await existing.deleteOne();
-      await ItineraryModel.updateOne({ _id: doc._id }, { $inc: { saveCount: -1 } });
+      const result = await SaveModel.deleteOne({ itineraryId: doc._id, userId: req.userId });
+      if (result.deletedCount > 0) {
+        await ItineraryModel.updateOne({ _id: doc._id }, { $inc: { saveCount: -1 } });
+      }
       active = false;
     } else {
       try {
@@ -239,8 +251,7 @@ itinerariesRouter.post("/:id/save", requireAuth, async (req: AuthenticatedReques
 
 itinerariesRouter.get("/:id/comments", optionalAuth, async (req: AuthenticatedRequest, res, next) => {
   try {
-    const id = req.params.id;
-    if (typeof id !== "string") throw new HttpError(404, "not_found", "Itinerary not found");
+    const id = getParam(req, "id", "Itinerary not found");
     const doc = await loadAccessible(id, req.userId ?? null, readInviteToken(req));
 
     const limit = Math.min(Number(req.query.limit ?? 50), 100);
@@ -279,8 +290,7 @@ itinerariesRouter.post(
   requireAuth,
   async (req: AuthenticatedRequest, res, next) => {
     try {
-      const id = req.params.id;
-      if (typeof id !== "string") throw new HttpError(404, "not_found", "Itinerary not found");
+      const id = getParam(req, "id", "Itinerary not found");
       const doc = await loadAccessible(id, req.userId, readInviteToken(req));
       const input = addCommentSchema.parse(req.body);
 
@@ -312,9 +322,8 @@ itinerariesRouter.delete(
   requireAuth,
   async (req: AuthenticatedRequest, res, next) => {
     try {
-      const commentId = req.params.commentId;
-      if (typeof commentId !== "string" || !isValidObjectId(commentId))
-        throw new HttpError(404, "not_found", "Comment not found");
+      const commentId = getParam(req, "commentId", "Comment not found");
+      if (!isValidObjectId(commentId)) throw new HttpError(404, "not_found", "Comment not found");
       const comment = await CommentModel.findById(commentId);
       if (!comment) throw new HttpError(404, "not_found", "Comment not found");
 
@@ -350,11 +359,11 @@ async function requireOwnerItinerary(id: string, userId: string) {
 itinerariesRouter.post(
   "/:id/swap",
   requireAuth,
+  swapRateLimiter,
   async (req: AuthenticatedRequest, res, next) => {
     try {
-      const id = req.params.id;
-      if (typeof id !== "string" || !isValidObjectId(id))
-        throw new HttpError(404, "not_found", "Itinerary not found");
+      const id = getParam(req, "id", "Itinerary not found");
+      if (!isValidObjectId(id)) throw new HttpError(404, "not_found", "Itinerary not found");
       const doc = await ItineraryModel.findById(id);
       if (!doc) throw new HttpError(404, "not_found", "Itinerary not found");
       if (!doc.ownerId || doc.ownerId.toString() !== req.userId)
@@ -413,9 +422,8 @@ itinerariesRouter.post(
   requireAuth,
   async (req: AuthenticatedRequest, res, next) => {
     try {
-      const id = req.params.id;
-      if (typeof id !== "string" || !isValidObjectId(id))
-        throw new HttpError(404, "not_found", "Itinerary not found");
+      const id = getParam(req, "id", "Itinerary not found");
+      if (!isValidObjectId(id)) throw new HttpError(404, "not_found", "Itinerary not found");
       const source = await ItineraryModel.findById(id);
       if (!source) throw new HttpError(404, "not_found", "Itinerary not found");
 
@@ -468,8 +476,7 @@ itinerariesRouter.post(
   requireAuth,
   async (req: AuthenticatedRequest, res, next) => {
     try {
-      const id = req.params.id;
-      if (typeof id !== "string") throw new HttpError(404, "not_found", "Itinerary not found");
+      const id = getParam(req, "id", "Itinerary not found");
       await requireOwnerItinerary(id, req.userId!);
       const input = createInviteSchema.parse(req.body ?? {});
 
@@ -491,8 +498,7 @@ itinerariesRouter.get(
   requireAuth,
   async (req: AuthenticatedRequest, res, next) => {
     try {
-      const id = req.params.id;
-      if (typeof id !== "string") throw new HttpError(404, "not_found", "Itinerary not found");
+      const id = getParam(req, "id", "Itinerary not found");
       await requireOwnerItinerary(id, req.userId!);
 
       const invites = await InviteModel.find({ itineraryId: id, revokedAt: null })
@@ -510,9 +516,8 @@ itinerariesRouter.delete(
   requireAuth,
   async (req: AuthenticatedRequest, res, next) => {
     try {
-      const inviteId = req.params.inviteId;
-      if (typeof inviteId !== "string" || !isValidObjectId(inviteId))
-        throw new HttpError(404, "not_found", "Invite not found");
+      const inviteId = getParam(req, "inviteId", "Invite not found");
+      if (!isValidObjectId(inviteId)) throw new HttpError(404, "not_found", "Invite not found");
       const invite = await InviteModel.findById(inviteId);
       if (!invite) throw new HttpError(404, "not_found", "Invite not found");
 
