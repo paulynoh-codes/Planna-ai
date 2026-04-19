@@ -1,5 +1,5 @@
 import { Schema, model, type InferSchemaType, type HydratedDocument } from "mongoose";
-import type { User } from "@planna/shared";
+import type { PublicProfile, User } from "@planna/shared";
 
 const userSchema = new Schema(
   {
@@ -27,5 +27,17 @@ export function toPublicUser(doc: UserDoc): User {
     avatarUrl: doc.avatarUrl || undefined,
     createdAt: doc.createdAt.toISOString(),
     updatedAt: doc.updatedAt.toISOString(),
+  };
+}
+
+export function toPublicProfile(doc: UserDoc, publishedCount: number): PublicProfile {
+  return {
+    id: doc._id.toString(),
+    username: doc.username,
+    displayName: doc.displayName,
+    bio: doc.bio || undefined,
+    avatarUrl: doc.avatarUrl || undefined,
+    publishedCount,
+    createdAt: doc.createdAt.toISOString(),
   };
 }

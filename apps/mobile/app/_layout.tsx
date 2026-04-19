@@ -14,16 +14,17 @@ export default function RootLayout() {
             headerStyle: { backgroundColor: colors.bg },
             headerTintColor: colors.ink,
             headerTitleStyle: { fontWeight: "600" },
+            headerShadowVisible: false,
             contentStyle: { backgroundColor: colors.bg },
           }}
         >
-          <Stack.Screen name="index" options={{ headerShown: false }} />
+          <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
           <Stack.Screen name="plan/index" options={{ title: "Plan a trip" }} />
           <Stack.Screen name="plan/result" options={{ title: "Your itinerary" }} />
           <Stack.Screen name="(auth)/signup" options={{ title: "Create account" }} />
           <Stack.Screen name="(auth)/login" options={{ title: "Log in" }} />
-          <Stack.Screen name="library" options={{ title: "Your trips" }} />
           <Stack.Screen name="itinerary/[id]" options={{ title: "Trip" }} />
+          <Stack.Screen name="u/[username]" options={{ title: "Profile" }} />
         </Stack>
       </AuthProvider>
     </SafeAreaProvider>

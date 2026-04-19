@@ -49,6 +49,8 @@ export interface ItineraryDay {
 export interface Itinerary {
   id: string;
   ownerId: string | null;
+  ownerUsername?: string;
+  ownerDisplayName?: string;
   title: string;
   destination: string;
   durationDays: number;
@@ -61,6 +63,11 @@ export interface Itinerary {
   days: ItineraryDay[];
   summary: string;
   coverImageUrl?: string;
+  likeCount: number;
+  saveCount: number;
+  commentCount: number;
+  likedByMe?: boolean;
+  savedByMe?: boolean;
   createdAt: string;
   updatedAt: string;
 }

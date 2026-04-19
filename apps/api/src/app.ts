@@ -5,6 +5,9 @@ import { env } from "./env.js";
 import { healthRouter } from "./routes/health.js";
 import { authRouter } from "./routes/auth.js";
 import { itinerariesRouter } from "./routes/itineraries.js";
+import { feedRouter } from "./routes/feed.js";
+import { usersRouter } from "./routes/users.js";
+import { savesRouter } from "./routes/saves.js";
 import { errorHandler, notFoundHandler } from "./middleware/error.js";
 
 export function createApp() {
@@ -24,6 +27,9 @@ export function createApp() {
   app.use("/api/auth", authRouter);
   app.use("/api/itinerary", itinerariesRouter); // singular for /generate
   app.use("/api/itineraries", itinerariesRouter);
+  app.use("/api/feed", feedRouter);
+  app.use("/api/users", usersRouter);
+  app.use("/api/saves", savesRouter);
 
   app.use(notFoundHandler);
   app.use(errorHandler);

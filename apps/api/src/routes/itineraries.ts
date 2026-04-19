@@ -3,10 +3,16 @@ import { Types } from "mongoose";
 import {
   generateItinerarySchema,
   updateItinerarySchema,
+  addCommentSchema,
   ANON_SESSION_HEADER,
 } from "@planna/shared";
-import { ItineraryModel, toPublicItinerary, isValidObjectId } from "../models/Itinerary.js";
+import { ItineraryModel, isValidObjectId, toPublicItinerary } from "../models/Itinerary.js";
+import { LikeModel } from "../models/Like.js";
+import { SaveModel } from "../models/Save.js";
+import { CommentModel, toPublicComment } from "../models/Comment.js";
+import { UserModel } from "../models/User.js";
 import { getAiClient } from "../services/ai.js";
+import { enrichItineraries, enrichItinerary } from "../services/enrich.js";
 import { HttpError } from "../middleware/error.js";
 import { optionalAuth, requireAuth, type AuthenticatedRequest } from "../middleware/auth.js";
 import { logger } from "../logger.js";
@@ -57,7 +63,8 @@ itinerariesRouter.post("/generate", optionalAuth, async (req: AuthenticatedReque
 itinerariesRouter.get("/", requireAuth, async (req: AuthenticatedRequest, res, next) => {
   try {
     const docs = await ItineraryModel.find({ ownerId: req.userId }).sort({ updatedAt: -1 }).limit(100);
-    res.json({ itineraries: docs.map(toPublicItinerary) });
+    const itineraries = await enrichItineraries(docs, req.userId!);
+    res.json({ itineraries });
   } catch (err) {
     next(err);
   }
@@ -66,7 +73,8 @@ itinerariesRouter.get("/", requireAuth, async (req: AuthenticatedRequest, res, n
 itinerariesRouter.get("/:id", optionalAuth, async (req: AuthenticatedRequest, res, next) => {
   try {
     const id = req.params.id;
-    if (typeof id !== "string" || !isValidObjectId(id)) throw new HttpError(404, "not_found", "Itinerary not found");
+    if (typeof id !== "string" || !isValidObjectId(id))
+      throw new HttpError(404, "not_found", "Itinerary not found");
     const doc = await ItineraryModel.findById(id);
     if (!doc) throw new HttpError(404, "not_found", "Itinerary not found");
 
@@ -74,7 +82,8 @@ itinerariesRouter.get("/:id", optionalAuth, async (req: AuthenticatedRequest, re
     if (!isOwner && doc.visibility !== "public") {
       throw new HttpError(404, "not_found", "Itinerary not found");
     }
-    res.json({ itinerary: toPublicItinerary(doc) });
+    const itinerary = await enrichItinerary(doc, req.userId ?? null);
+    res.json({ itinerary });
   } catch (err) {
     next(err);
   }
@@ -83,7 +92,8 @@ itinerariesRouter.get("/:id", optionalAuth, async (req: AuthenticatedRequest, re
 itinerariesRouter.patch("/:id", requireAuth, async (req: AuthenticatedRequest, res, next) => {
   try {
     const id = req.params.id;
-    if (typeof id !== "string" || !isValidObjectId(id)) throw new HttpError(404, "not_found", "Itinerary not found");
+    if (typeof id !== "string" || !isValidObjectId(id))
+      throw new HttpError(404, "not_found", "Itinerary not found");
     const input = updateItinerarySchema.parse(req.body);
     const doc = await ItineraryModel.findById(id);
     if (!doc) throw new HttpError(404, "not_found", "Itinerary not found");
@@ -115,7 +125,8 @@ itinerariesRouter.patch("/:id", requireAuth, async (req: AuthenticatedRequest, r
       );
     }
     await doc.save();
-    res.json({ itinerary: toPublicItinerary(doc) });
+    const itinerary = await enrichItinerary(doc, req.userId!);
+    res.json({ itinerary });
   } catch (err) {
     next(err);
   }
@@ -124,15 +135,184 @@ itinerariesRouter.patch("/:id", requireAuth, async (req: AuthenticatedRequest, r
 itinerariesRouter.delete("/:id", requireAuth, async (req: AuthenticatedRequest, res, next) => {
   try {
     const id = req.params.id;
-    if (typeof id !== "string" || !isValidObjectId(id)) throw new HttpError(404, "not_found", "Itinerary not found");
+    if (typeof id !== "string" || !isValidObjectId(id))
+      throw new HttpError(404, "not_found", "Itinerary not found");
     const doc = await ItineraryModel.findById(id);
     if (!doc) throw new HttpError(404, "not_found", "Itinerary not found");
     if (!doc.ownerId || doc.ownerId.toString() !== req.userId) {
       throw new HttpError(403, "forbidden", "Not your itinerary");
     }
-    await doc.deleteOne();
+    await Promise.all([
+      doc.deleteOne(),
+      LikeModel.deleteMany({ itineraryId: doc._id }),
+      SaveModel.deleteMany({ itineraryId: doc._id }),
+      CommentModel.deleteMany({ itineraryId: doc._id }),
+    ]);
     res.status(204).end();
   } catch (err) {
     next(err);
   }
 });
+
+async function loadPublicOrOwn(id: string, viewerId: string | null | undefined) {
+  if (!isValidObjectId(id)) throw new HttpError(404, "not_found", "Itinerary not found");
+  const doc = await ItineraryModel.findById(id);
+  if (!doc) throw new HttpError(404, "not_found", "Itinerary not found");
+  const isOwner = viewerId && doc.ownerId && doc.ownerId.toString() === viewerId;
+  if (!isOwner && doc.visibility !== "public")
+    throw new HttpError(404, "not_found", "Itinerary not found");
+  return doc;
+}
+
+itinerariesRouter.post("/:id/like", requireAuth, async (req: AuthenticatedRequest, res, next) => {
+  try {
+    const id = req.params.id;
+    if (typeof id !== "string") throw new HttpError(404, "not_found", "Itinerary not found");
+    const doc = await loadPublicOrOwn(id, req.userId);
+
+    const existing = await LikeModel.findOne({ itineraryId: doc._id, userId: req.userId });
+    let active: boolean;
+    if (existing) {
+      await existing.deleteOne();
+      await ItineraryModel.updateOne({ _id: doc._id }, { $inc: { likeCount: -1 } });
+      active = false;
+    } else {
+      try {
+        await LikeModel.create({ itineraryId: doc._id, userId: req.userId });
+        await ItineraryModel.updateOne({ _id: doc._id }, { $inc: { likeCount: 1 } });
+      } catch (err: any) {
+        if (err?.code !== 11000) throw err;
+      }
+      active = true;
+    }
+    const fresh = await ItineraryModel.findById(doc._id).select("likeCount");
+    res.json({ active, count: Math.max(0, fresh?.likeCount ?? 0) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+itinerariesRouter.post("/:id/save", requireAuth, async (req: AuthenticatedRequest, res, next) => {
+  try {
+    const id = req.params.id;
+    if (typeof id !== "string") throw new HttpError(404, "not_found", "Itinerary not found");
+    const doc = await loadPublicOrOwn(id, req.userId);
+
+    const existing = await SaveModel.findOne({ itineraryId: doc._id, userId: req.userId });
+    let active: boolean;
+    if (existing) {
+      await existing.deleteOne();
+      await ItineraryModel.updateOne({ _id: doc._id }, { $inc: { saveCount: -1 } });
+      active = false;
+    } else {
+      try {
+        await SaveModel.create({ itineraryId: doc._id, userId: req.userId });
+        await ItineraryModel.updateOne({ _id: doc._id }, { $inc: { saveCount: 1 } });
+      } catch (err: any) {
+        if (err?.code !== 11000) throw err;
+      }
+      active = true;
+    }
+    const fresh = await ItineraryModel.findById(doc._id).select("saveCount");
+    res.json({ active, count: Math.max(0, fresh?.saveCount ?? 0) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+itinerariesRouter.get("/:id/comments", optionalAuth, async (req: AuthenticatedRequest, res, next) => {
+  try {
+    const id = req.params.id;
+    if (typeof id !== "string") throw new HttpError(404, "not_found", "Itinerary not found");
+    const doc = await loadPublicOrOwn(id, req.userId);
+
+    const limit = Math.min(Number(req.query.limit ?? 50), 100);
+    const cursor = typeof req.query.cursor === "string" ? req.query.cursor : null;
+    const query: Record<string, unknown> = { itineraryId: doc._id };
+    if (cursor && isValidObjectId(cursor)) query._id = { $lt: new Types.ObjectId(cursor) };
+
+    const comments = await CommentModel.find(query).sort({ _id: -1 }).limit(limit + 1);
+    const hasMore = comments.length > limit;
+    const slice = hasMore ? comments.slice(0, limit) : comments;
+
+    const authorIds = Array.from(new Set(slice.map((c) => c.userId.toString())));
+    const authors = await UserModel.find({ _id: { $in: authorIds } }).select("username displayName");
+    const authorMap = new Map(
+      authors.map((a) => [a._id.toString(), { username: a.username, displayName: a.displayName }]),
+    );
+
+    res.json({
+      comments: slice.map((c) => {
+        const author = authorMap.get(c.userId.toString());
+        return toPublicComment(c, {
+          id: c.userId.toString(),
+          username: author?.username ?? "unknown",
+          displayName: author?.displayName ?? "Unknown",
+        });
+      }),
+      nextCursor: hasMore ? slice[slice.length - 1]!._id.toString() : null,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+itinerariesRouter.post(
+  "/:id/comments",
+  requireAuth,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const id = req.params.id;
+      if (typeof id !== "string") throw new HttpError(404, "not_found", "Itinerary not found");
+      const doc = await loadPublicOrOwn(id, req.userId);
+      const input = addCommentSchema.parse(req.body);
+
+      const comment = await CommentModel.create({
+        itineraryId: doc._id,
+        userId: req.userId,
+        text: input.text,
+      });
+      await ItineraryModel.updateOne({ _id: doc._id }, { $inc: { commentCount: 1 } });
+
+      const author = await UserModel.findById(req.userId).select("username displayName");
+      if (!author) throw new HttpError(404, "not_found", "User not found");
+
+      res.status(201).json({
+        comment: toPublicComment(comment, {
+          id: author._id.toString(),
+          username: author.username,
+          displayName: author.displayName,
+        }),
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+itinerariesRouter.delete(
+  "/comments/:commentId",
+  requireAuth,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const commentId = req.params.commentId;
+      if (typeof commentId !== "string" || !isValidObjectId(commentId))
+        throw new HttpError(404, "not_found", "Comment not found");
+      const comment = await CommentModel.findById(commentId);
+      if (!comment) throw new HttpError(404, "not_found", "Comment not found");
+
+      const itinerary = await ItineraryModel.findById(comment.itineraryId).select("ownerId");
+      const isAuthor = comment.userId.toString() === req.userId;
+      const isItineraryOwner =
+        itinerary?.ownerId && itinerary.ownerId.toString() === req.userId;
+      if (!isAuthor && !isItineraryOwner)
+        throw new HttpError(403, "forbidden", "Cannot delete this comment");
+
+      await comment.deleteOne();
+      await ItineraryModel.updateOne({ _id: comment.itineraryId }, { $inc: { commentCount: -1 } });
+      res.status(204).end();
+    } catch (err) {
+      next(err);
+    }
+  },
+);

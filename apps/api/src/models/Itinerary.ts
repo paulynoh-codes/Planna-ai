@@ -47,26 +47,47 @@ const itinerarySchema = new Schema(
     tripType: { type: String, enum: ["solo", "couple", "group"], required: true },
     vibeTags: { type: [String], default: [] },
     visibility: { type: String, enum: ["private", "public"], default: "private", index: true },
-    isFeatured: { type: Boolean, default: false },
+    isFeatured: { type: Boolean, default: false, index: true },
     sourceItineraryId: { type: Schema.Types.ObjectId, ref: "Itinerary", default: null },
     days: { type: [daySchema], default: [] },
     summary: { type: String, default: "" },
     coverImageUrl: { type: String, default: "" },
+    likeCount: { type: Number, default: 0 },
+    saveCount: { type: Number, default: 0 },
+    commentCount: { type: Number, default: 0 },
   },
   { timestamps: true },
 );
 
 itinerarySchema.index({ ownerId: 1, updatedAt: -1 });
 itinerarySchema.index({ visibility: 1, createdAt: -1 });
+itinerarySchema.index({ visibility: 1, isFeatured: 1, createdAt: -1 });
 
 export type ItineraryDoc = HydratedDocument<InferSchemaType<typeof itinerarySchema>>;
 
 export const ItineraryModel = model("Itinerary", itinerarySchema);
 
-export function toPublicItinerary(doc: ItineraryDoc): Itinerary {
+export interface OwnerRef {
+  id: string;
+  username?: string;
+  displayName?: string;
+}
+
+export interface EngagementFlags {
+  likedByMe?: boolean;
+  savedByMe?: boolean;
+}
+
+export function toPublicItinerary(
+  doc: ItineraryDoc,
+  opts: { owner?: OwnerRef | null; engagement?: EngagementFlags } = {},
+): Itinerary {
+  const ownerId = doc.ownerId ? doc.ownerId.toString() : null;
   return {
     id: doc._id.toString(),
-    ownerId: doc.ownerId ? doc.ownerId.toString() : null,
+    ownerId,
+    ownerUsername: opts.owner?.username,
+    ownerDisplayName: opts.owner?.displayName,
     title: doc.title,
     destination: doc.destination,
     durationDays: doc.durationDays,
@@ -92,6 +113,11 @@ export function toPublicItinerary(doc: ItineraryDoc): Itinerary {
     })),
     summary: doc.summary,
     coverImageUrl: doc.coverImageUrl || undefined,
+    likeCount: doc.likeCount ?? 0,
+    saveCount: doc.saveCount ?? 0,
+    commentCount: doc.commentCount ?? 0,
+    likedByMe: opts.engagement?.likedByMe,
+    savedByMe: opts.engagement?.savedByMe,
     createdAt: doc.createdAt.toISOString(),
     updatedAt: doc.updatedAt.toISOString(),
   };

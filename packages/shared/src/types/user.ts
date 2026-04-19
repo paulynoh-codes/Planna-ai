@@ -9,6 +9,16 @@ export interface User {
   updatedAt: string;
 }
 
+export interface PublicProfile {
+  id: string;
+  username: string;
+  displayName: string;
+  bio?: string;
+  avatarUrl?: string;
+  publishedCount: number;
+  createdAt: string;
+}
+
 export interface AuthTokens {
   accessToken: string;
 }

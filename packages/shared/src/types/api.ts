@@ -1,5 +1,5 @@
 import type { Itinerary, BudgetTier, TripType, VibeTag } from "./itinerary";
-import type { AuthResponse } from "./user";
+import type { AuthResponse, PublicProfile } from "./user";
 
 export interface ApiError {
   error: {
@@ -50,6 +50,45 @@ export interface UpdateItineraryRequest {
   visibility?: "private" | "public";
   coverImageUrl?: string;
   days?: Itinerary["days"];
+}
+
+export interface FeedResponse {
+  featured: Itinerary[];
+  recent: Itinerary[];
+  recentNextCursor: string | null;
+}
+
+export interface Comment {
+  id: string;
+  itineraryId: string;
+  userId: string;
+  username: string;
+  displayName: string;
+  text: string;
+  createdAt: string;
+}
+
+export interface ListCommentsResponse {
+  comments: Comment[];
+  nextCursor: string | null;
+}
+
+export interface AddCommentRequest {
+  text: string;
+}
+
+export interface AddCommentResponse {
+  comment: Comment;
+}
+
+export interface ToggleResponse {
+  active: boolean;
+  count: number;
+}
+
+export interface ProfileResponse {
+  profile: PublicProfile;
+  itineraries: Itinerary[];
 }
 
 export const ANON_SESSION_HEADER = "x-anon-session";

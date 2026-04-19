@@ -1,13 +1,19 @@
 import Constants from "expo-constants";
 import {
   ANON_SESSION_HEADER,
+  type AddCommentRequest,
+  type AddCommentResponse,
   type AuthApiResponse,
+  type FeedResponse,
   type GenerateItineraryRequest,
   type GenerateItineraryResponse,
   type ItineraryResponse,
+  type ListCommentsResponse,
   type ListItinerariesResponse,
   type LoginRequest,
+  type ProfileResponse,
   type SignupRequest,
+  type ToggleResponse,
   type UpdateItineraryRequest,
 } from "@planna/shared";
 import { getItem } from "./storage";
@@ -95,5 +101,36 @@ export const api = {
   },
   deleteItinerary(id: string) {
     return request<null>(`/api/itineraries/${id}`, { method: "DELETE" });
+  },
+
+  // Phase 2
+  feed(cursor?: string | null) {
+    const q = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
+    return request<FeedResponse>(`/api/feed${q}`);
+  },
+  toggleLike(id: string) {
+    return request<ToggleResponse>(`/api/itineraries/${id}/like`, { method: "POST" });
+  },
+  toggleSave(id: string) {
+    return request<ToggleResponse>(`/api/itineraries/${id}/save`, { method: "POST" });
+  },
+  listComments(id: string, cursor?: string | null) {
+    const q = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
+    return request<ListCommentsResponse>(`/api/itineraries/${id}/comments${q}`);
+  },
+  addComment(id: string, body: AddCommentRequest) {
+    return request<AddCommentResponse>(`/api/itineraries/${id}/comments`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  },
+  deleteComment(commentId: string) {
+    return request<null>(`/api/itineraries/comments/${commentId}`, { method: "DELETE" });
+  },
+  listSaves() {
+    return request<ListItinerariesResponse>("/api/saves");
+  },
+  profile(username: string) {
+    return request<ProfileResponse>(`/api/users/${encodeURIComponent(username)}`);
   },
 };

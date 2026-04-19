@@ -1,9 +1,9 @@
 import { Link, router } from "expo-router";
 import { StyleSheet, Text, View } from "react-native";
-import { Button } from "../src/components/Button";
-import { Screen } from "../src/components/Screen";
-import { useAuth } from "../src/lib/auth";
-import { colors, spacing, type } from "../src/theme";
+import { Button } from "../../src/components/Button";
+import { Screen } from "../../src/components/Screen";
+import { useAuth } from "../../src/lib/auth";
+import { colors, spacing, type } from "../../src/theme";
 
 export default function Landing() {
   const { user, signOut } = useAuth();
