@@ -19,6 +19,8 @@ import {
   type RemixItineraryResponse,
   type ResolveInviteResponse,
   type SignupRequest,
+  type SwapSuggestionsRequest,
+  type SwapSuggestionsResponse,
   type ToggleResponse,
   type UpdateItineraryRequest,
 } from "@planna/shared";
@@ -170,5 +172,13 @@ export const api = {
   // Phase 4: remix
   remixItinerary(id: string) {
     return request<RemixItineraryResponse>(`/api/itineraries/${id}/remix`, { method: "POST" });
+  },
+
+  // Phase 5: smart swaps
+  suggestSwaps(id: string, body: SwapSuggestionsRequest) {
+    return request<SwapSuggestionsResponse>(`/api/itineraries/${id}/swap`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
   },
 };

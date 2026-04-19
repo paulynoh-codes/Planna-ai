@@ -2,6 +2,7 @@ import { router, useLocalSearchParams } from "expo-router";
 import { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
+  Modal,
   Platform,
   Pressable,
   Share,
@@ -11,7 +12,7 @@ import {
   TextInput,
   View,
 } from "react-native";
-import type { Comment, Invite, Itinerary } from "@planna/shared";
+import type { Comment, Invite, Itinerary, ItineraryItem } from "@planna/shared";
 import { Button } from "../../src/components/Button";
 import { Field } from "../../src/components/Field";
 import { ItineraryView } from "../../src/components/ItineraryView";
@@ -46,6 +47,10 @@ export default function ItineraryDetailScreen() {
   const [copiedToken, setCopiedToken] = useState<string | null>(null);
 
   const [remixing, setRemixing] = useState(false);
+
+  const [swapTarget, setSwapTarget] = useState<{ dayNumber: number; itemId: string } | null>(null);
+  const [swapSuggestions, setSwapSuggestions] = useState<ItineraryItem[] | null>(null);
+  const [applyingSwapId, setApplyingSwapId] = useState<string | null>(null);
 
   const isOwner = !!itinerary && !!user && itinerary.ownerId === user.id;
   const canRemix = !!itinerary && !isOwner && itinerary.visibility === "public";
@@ -238,6 +243,47 @@ export default function ItineraryDetailScreen() {
     }
   }
 
+  async function handleSwap(dayNumber: number, itemId: string) {
+    if (!itinerary) return;
+    setSwapTarget({ dayNumber, itemId });
+    setSwapSuggestions(null);
+    try {
+      const res = await api.suggestSwaps(itinerary.id, { dayNumber, itemId });
+      setSwapSuggestions(res.suggestions);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not fetch alternatives.");
+      setSwapTarget(null);
+    }
+  }
+
+  async function applySwap(pick: ItineraryItem) {
+    if (!itinerary || !swapTarget) return;
+    setApplyingSwapId(pick.itemId);
+    try {
+      const nextDays = itinerary.days.map((d) =>
+        d.dayNumber === swapTarget.dayNumber
+          ? {
+              ...d,
+              items: d.items.map((it) => (it.itemId === swapTarget.itemId ? pick : it)),
+            }
+          : d,
+      );
+      const res = await api.updateItinerary(itinerary.id, { days: nextDays });
+      setItinerary(res.itinerary);
+      setSwapTarget(null);
+      setSwapSuggestions(null);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not apply swap.");
+    } finally {
+      setApplyingSwapId(null);
+    }
+  }
+
+  function cancelSwap() {
+    setSwapTarget(null);
+    setSwapSuggestions(null);
+  }
+
   async function handleRemix() {
     if (!itinerary) return;
     if (!user) {
@@ -339,7 +385,11 @@ export default function ItineraryDetailScreen() {
 
       {error ? <Text style={styles.error}>{error}</Text> : null}
 
-      <ItineraryView itinerary={itinerary} />
+      <ItineraryView
+        itinerary={itinerary}
+        onSwapItem={isOwner ? handleSwap : undefined}
+        swappingItemId={swapTarget?.itemId ?? null}
+      />
 
       <View style={styles.engagement}>
         <EngagementButton
@@ -473,6 +523,50 @@ export default function ItineraryDetailScreen() {
       </View>
 
       {isOwner ? <Button label="Delete trip" variant="danger" onPress={handleDelete} /> : null}
+
+      <Modal
+        visible={!!swapTarget}
+        animationType="slide"
+        transparent
+        onRequestClose={cancelSwap}
+      >
+        <Pressable style={styles.swapBackdrop} onPress={cancelSwap}>
+          <Pressable style={styles.swapSheet} onPress={() => {}}>
+            <Text style={styles.sectionTitle}>Alternatives</Text>
+            {swapSuggestions === null ? (
+              <View style={{ paddingVertical: spacing.xl, alignItems: "center" }}>
+                <ActivityIndicator color={colors.ink} />
+                <Text style={[styles.meta, { marginTop: spacing.sm }]}>
+                  Finding options…
+                </Text>
+              </View>
+            ) : (
+              swapSuggestions.map((s) => (
+                <Pressable
+                  key={s.itemId}
+                  onPress={() => applySwap(s)}
+                  disabled={!!applyingSwapId}
+                  style={({ pressed }) => [
+                    styles.swapCard,
+                    pressed && { opacity: 0.85 },
+                    applyingSwapId === s.itemId && { opacity: 0.5 },
+                  ]}
+                >
+                  <Text style={styles.itemSlotMeta}>
+                    {s.timeSlot.toUpperCase()} · {s.category.toUpperCase()}
+                  </Text>
+                  <Text style={styles.swapCardName}>{s.name}</Text>
+                  {s.area ? <Text style={styles.swapCardArea}>{s.area}</Text> : null}
+                  {s.description ? (
+                    <Text style={styles.swapCardDesc}>{s.description}</Text>
+                  ) : null}
+                </Pressable>
+              ))
+            )}
+            <Button label="Cancel" variant="ghost" onPress={cancelSwap} />
+          </Pressable>
+        </Pressable>
+      </Modal>
     </Screen>
   );
 }
@@ -614,4 +708,29 @@ const styles = StyleSheet.create({
     borderColor: colors.line,
   },
   loadMoreLabel: { ...type.body, color: colors.ink, fontWeight: "600" },
+  swapBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.35)",
+    justifyContent: "flex-end",
+  },
+  swapSheet: {
+    backgroundColor: colors.bg,
+    padding: spacing.lg,
+    borderTopLeftRadius: radius.lg,
+    borderTopRightRadius: radius.lg,
+    gap: spacing.md,
+    maxHeight: "85%",
+  },
+  swapCard: {
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.line,
+    borderRadius: radius.md,
+    padding: spacing.md,
+    gap: 2,
+  },
+  itemSlotMeta: { ...type.caption, color: colors.inkMuted, letterSpacing: 1 },
+  swapCardName: { ...type.h2, color: colors.ink },
+  swapCardArea: { ...type.body, color: colors.inkMuted, fontStyle: "italic" },
+  swapCardDesc: { ...type.body, color: colors.ink, marginTop: 2 },
 });

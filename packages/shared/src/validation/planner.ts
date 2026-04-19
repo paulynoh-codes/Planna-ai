@@ -43,3 +43,10 @@ export const updateItinerarySchema = z.object({
 });
 
 export type UpdateItineraryInput = z.infer<typeof updateItinerarySchema>;
+
+export const swapSuggestionsSchema = z.object({
+  dayNumber: z.number().int().min(1).max(7),
+  itemId: z.string().min(1).max(120),
+});
+
+export type SwapSuggestionsInput = z.infer<typeof swapSuggestionsSchema>;

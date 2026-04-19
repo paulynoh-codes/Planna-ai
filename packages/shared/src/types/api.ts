@@ -1,4 +1,4 @@
-import type { Itinerary, BudgetTier, TripType, VibeTag } from "./itinerary";
+import type { Itinerary, BudgetTier, TripType, VibeTag, ItineraryItem } from "./itinerary";
 import type { AuthResponse, PublicProfile } from "./user";
 
 export interface ApiError {
@@ -89,6 +89,15 @@ export interface ToggleResponse {
 export interface ProfileResponse {
   profile: PublicProfile;
   itineraries: Itinerary[];
+}
+
+export interface SwapSuggestionsRequest {
+  dayNumber: number;
+  itemId: string;
+}
+
+export interface SwapSuggestionsResponse {
+  suggestions: ItineraryItem[];
 }
 
 export const ANON_SESSION_HEADER = "x-anon-session";

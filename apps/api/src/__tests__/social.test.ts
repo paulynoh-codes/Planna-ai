@@ -35,6 +35,9 @@ beforeAll(async () => {
         })),
       };
     },
+    async generateSwapSuggestions() {
+      throw new Error("generateSwapSuggestions not mocked in this suite");
+    },
   });
 });
 

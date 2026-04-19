@@ -6,9 +6,11 @@ import {
   updateItinerarySchema,
   addCommentSchema,
   createInviteSchema,
+  swapSuggestionsSchema,
   ANON_SESSION_HEADER,
   INVITE_TOKEN_HEADER,
 } from "@planna/shared";
+import type { Itinerary, ItineraryItem } from "@planna/shared";
 import { ItineraryModel, isValidObjectId, toPublicItinerary } from "../models/Itinerary.js";
 import { LikeModel } from "../models/Like.js";
 import { SaveModel } from "../models/Save.js";
@@ -344,6 +346,67 @@ async function requireOwnerItinerary(id: string, userId: string) {
     throw new HttpError(403, "forbidden", "Not your itinerary");
   return doc;
 }
+
+itinerariesRouter.post(
+  "/:id/swap",
+  requireAuth,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const id = req.params.id;
+      if (typeof id !== "string" || !isValidObjectId(id))
+        throw new HttpError(404, "not_found", "Itinerary not found");
+      const doc = await ItineraryModel.findById(id);
+      if (!doc) throw new HttpError(404, "not_found", "Itinerary not found");
+      if (!doc.ownerId || doc.ownerId.toString() !== req.userId)
+        throw new HttpError(403, "forbidden", "Not your itinerary");
+
+      const input = swapSuggestionsSchema.parse(req.body);
+      const day = doc.days.find((d) => d.dayNumber === input.dayNumber);
+      if (!day) throw new HttpError(404, "item_not_found", "Day not found");
+      const current = day.items.find((it) => it.itemId === input.itemId);
+      if (!current) throw new HttpError(404, "item_not_found", "Item not found");
+
+      const sameDayOthers = day.items
+        .filter((it) => it.itemId !== current.itemId)
+        .map((it) => ({
+          name: it.name,
+          area: it.area,
+          timeSlot: it.timeSlot as ItineraryItem["timeSlot"],
+          category: it.category as ItineraryItem["category"],
+        }));
+
+      const ai = getAiClient();
+      let suggestions;
+      try {
+        suggestions = await ai.generateSwapSuggestions({
+          destination: doc.destination,
+          budgetTier: doc.budgetTier as Itinerary["budgetTier"],
+          tripType: doc.tripType as Itinerary["tripType"],
+          vibeTags: doc.vibeTags as Itinerary["vibeTags"],
+          dayTitle: day.title,
+          current: {
+            itemId: current.itemId,
+            category: current.category as ItineraryItem["category"],
+            name: current.name,
+            area: current.area,
+            description: current.description,
+            timeSlot: current.timeSlot as ItineraryItem["timeSlot"],
+            notes: current.notes,
+            sourceType: current.sourceType as ItineraryItem["sourceType"],
+          },
+          sameDayOtherItems: sameDayOthers,
+        });
+      } catch (err) {
+        logger.error({ err }, "swap suggestions failed");
+        throw new HttpError(502, "ai_unavailable", "Could not fetch alternatives. Try again shortly.");
+      }
+
+      res.json({ suggestions });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
 
 itinerariesRouter.post(
   "/:id/remix",

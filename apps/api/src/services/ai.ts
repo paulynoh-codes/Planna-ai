@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { v4 as uuid } from "uuid";
 import type { GenerateItineraryInput } from "@planna/shared";
-import type { Itinerary, ItineraryDay } from "@planna/shared";
+import type { Itinerary, ItineraryDay, ItineraryItem } from "@planna/shared";
 import { env } from "../env.js";
 import { logger } from "../logger.js";
 
@@ -88,9 +88,65 @@ type RawItem = {
 
 type RawDay = { dayNumber: number; title: string; items: RawItem[] };
 
+export interface SwapContext {
+  destination: string;
+  budgetTier: Itinerary["budgetTier"];
+  tripType: Itinerary["tripType"];
+  vibeTags: Itinerary["vibeTags"];
+  dayTitle: string;
+  current: ItineraryItem;
+  sameDayOtherItems: Array<Pick<ItineraryItem, "name" | "area" | "timeSlot" | "category">>;
+}
+
 export interface AiClient {
   generateItinerary(input: GenerateItineraryInput): Promise<GeneratedItineraryBody>;
+  generateSwapSuggestions(ctx: SwapContext): Promise<ItineraryItem[]>;
 }
+
+const SWAP_SYSTEM_PROMPT = `You are Planna, suggesting alternatives to a single itinerary item.
+
+Your job: given a trip's destination, vibe, budget, and one target item, emit exactly 3 alternative items that could replace it in the same slot.
+
+Hard rules:
+- Output is emitted via the emit_swaps tool. Never respond in plain text.
+- Each alternative must keep the same timeSlot as the original.
+- Each alternative must feel distinct from each other (different neighborhoods or different angles).
+- Each alternative must feel distinct from the current item and the same-day items listed.
+- Categories can shift (e.g. swap a "food" for an "activity") if it fits the slot and vibe, but default to matching the original's category unless that would duplicate a same-day item.
+- Only use real, well-known neighborhoods and place types. Do NOT invent specific business names you are not confident exist — prefer a category + real neighborhood.
+- Keep descriptions to 1-2 tight sentences.
+- No emojis.
+- No reservations/pricing claims.`;
+
+const SWAP_TOOL_NAME = "emit_swaps";
+const SWAP_TOOL_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    suggestions: {
+      type: "array",
+      minItems: 3,
+      maxItems: 3,
+      items: {
+        type: "object",
+        properties: {
+          category: {
+            type: "string",
+            enum: ["food", "activity", "sight", "lodging", "transport", "nightlife", "other"],
+          },
+          name: { type: "string" },
+          area: { type: "string", description: "Neighborhood or district." },
+          description: { type: "string" },
+          timeSlot: {
+            type: "string",
+            enum: ["morning", "midday", "afternoon", "evening", "night"],
+          },
+        },
+        required: ["category", "name", "area", "description", "timeSlot"],
+      },
+    },
+  },
+  required: ["suggestions"],
+};
 
 class AnthropicAiClient implements AiClient {
   private client: Anthropic;
@@ -136,6 +192,56 @@ Return exactly ${input.durationDays} days, numbered 1 through ${input.durationDa
     const raw = toolUse.input as { title: string; summary: string; days: RawDay[] };
     return normalizeGenerated(raw, input.durationDays);
   }
+
+  async generateSwapSuggestions(ctx: SwapContext): Promise<ItineraryItem[]> {
+    const sameDay = ctx.sameDayOtherItems.length
+      ? ctx.sameDayOtherItems
+          .map((i) => `- ${i.timeSlot} ${i.category}: ${i.name} (${i.area})`)
+          .join("\n")
+      : "(none)";
+    const userMessage = `Destination: ${ctx.destination}
+Budget tier: ${ctx.budgetTier}
+Trip type: ${ctx.tripType}
+Vibe tags: ${ctx.vibeTags.join(", ")}
+Day: ${ctx.dayTitle}
+
+Current item (to replace):
+- ${ctx.current.timeSlot} ${ctx.current.category}: ${ctx.current.name} (${ctx.current.area})
+  ${ctx.current.description}
+
+Other items already scheduled the same day:
+${sameDay}
+
+Emit 3 distinct alternatives for the ${ctx.current.timeSlot} slot.`;
+
+    const systemBlocks = [
+      { type: "text", text: SWAP_SYSTEM_PROMPT, cache_control: { type: "ephemeral" } },
+    ] as unknown as Anthropic.TextBlockParam[];
+    const tools = [
+      {
+        name: SWAP_TOOL_NAME,
+        description: "Emit 3 alternative itinerary items.",
+        input_schema: SWAP_TOOL_SCHEMA,
+        cache_control: { type: "ephemeral" },
+      },
+    ] as unknown as Anthropic.Tool[];
+
+    const response = await this.client.messages.create({
+      model: MODEL,
+      max_tokens: 800,
+      system: systemBlocks,
+      tools,
+      tool_choice: { type: "tool", name: SWAP_TOOL_NAME },
+      messages: [{ role: "user", content: userMessage }],
+    });
+
+    const toolUse = response.content.find((b) => b.type === "tool_use");
+    if (!toolUse || toolUse.type !== "tool_use") {
+      throw new Error("AI response did not include a tool_use block");
+    }
+    const raw = toolUse.input as { suggestions: RawItem[] };
+    return normalizeSwaps(raw.suggestions, ctx.current.timeSlot);
+  }
 }
 
 class StubAiClient implements AiClient {
@@ -179,6 +285,38 @@ class StubAiClient implements AiClient {
       days,
     };
   }
+
+  async generateSwapSuggestions(ctx: SwapContext): Promise<ItineraryItem[]> {
+    const templates: Array<Pick<ItineraryItem, "category" | "name" | "area" | "description">> = [
+      {
+        category: ctx.current.category,
+        name: `${ctx.current.area || ctx.destination} neighborhood alternative`,
+        area: ctx.current.area || ctx.destination,
+        description: "A similar option with a different angle on the area.",
+      },
+      {
+        category: ctx.current.category === "food" ? "activity" : "food",
+        name: "Cross-category detour",
+        area: ctx.destination,
+        description: "Shifts the slot's energy without breaking the day's flow.",
+      },
+      {
+        category: "sight",
+        name: `Hidden gem in ${ctx.destination}`,
+        area: ctx.destination,
+        description: "Lesser-known spot that locals love.",
+      },
+    ];
+    return templates.map((t) => ({
+      itemId: uuid(),
+      category: t.category as ItineraryItem["category"],
+      name: t.name,
+      area: t.area,
+      description: t.description,
+      timeSlot: ctx.current.timeSlot,
+      sourceType: "swapped" as const,
+    }));
+  }
 }
 
 function normalizeGenerated(
@@ -206,6 +344,19 @@ function normalizeGenerated(
     summary: raw.summary ?? "",
     days,
   };
+}
+
+function normalizeSwaps(raw: RawItem[] | undefined, fallbackSlot: ItineraryItem["timeSlot"]): ItineraryItem[] {
+  return (raw ?? []).slice(0, 3).map((it) => ({
+    itemId: uuid(),
+    category: coerceCategory(it.category),
+    name: it.name ?? "Alternative",
+    area: it.area ?? "",
+    description: it.description ?? "",
+    timeSlot: coerceTimeSlot(it.timeSlot ?? fallbackSlot),
+    notes: it.notes,
+    sourceType: "swapped",
+  }));
 }
 
 function coerceCategory(v: string): ItineraryDay["items"][number]["category"] {
