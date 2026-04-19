@@ -55,6 +55,7 @@ const itinerarySchema = new Schema(
     likeCount: { type: Number, default: 0 },
     saveCount: { type: Number, default: 0 },
     commentCount: { type: Number, default: 0 },
+    remixCount: { type: Number, default: 0 },
   },
   { timestamps: true },
 );
@@ -78,9 +79,20 @@ export interface EngagementFlags {
   savedByMe?: boolean;
 }
 
+export interface RemixSourceRef {
+  id: string;
+  title: string;
+  ownerUsername?: string;
+  ownerDisplayName?: string;
+}
+
 export function toPublicItinerary(
   doc: ItineraryDoc,
-  opts: { owner?: OwnerRef | null; engagement?: EngagementFlags } = {},
+  opts: {
+    owner?: OwnerRef | null;
+    engagement?: EngagementFlags;
+    remixedFrom?: RemixSourceRef | null;
+  } = {},
 ): Itinerary {
   const ownerId = doc.ownerId ? doc.ownerId.toString() : null;
   return {
@@ -97,6 +109,8 @@ export function toPublicItinerary(
     visibility: doc.visibility as Itinerary["visibility"],
     isFeatured: Boolean(doc.isFeatured),
     sourceItineraryId: doc.sourceItineraryId ? doc.sourceItineraryId.toString() : null,
+    remixedFrom: opts.remixedFrom ?? null,
+    remixCount: doc.remixCount ?? 0,
     days: doc.days.map((d) => ({
       dayNumber: d.dayNumber,
       title: d.title,

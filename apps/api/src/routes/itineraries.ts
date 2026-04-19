@@ -346,6 +346,61 @@ async function requireOwnerItinerary(id: string, userId: string) {
 }
 
 itinerariesRouter.post(
+  "/:id/remix",
+  requireAuth,
+  async (req: AuthenticatedRequest, res, next) => {
+    try {
+      const id = req.params.id;
+      if (typeof id !== "string" || !isValidObjectId(id))
+        throw new HttpError(404, "not_found", "Itinerary not found");
+      const source = await ItineraryModel.findById(id);
+      if (!source) throw new HttpError(404, "not_found", "Itinerary not found");
+
+      const sourceOwnerId = source.ownerId ? source.ownerId.toString() : null;
+      const isOwner = !!sourceOwnerId && sourceOwnerId === req.userId;
+      if (source.visibility !== "public" && !isOwner) {
+        throw new HttpError(404, "not_found", "Itinerary not found");
+      }
+
+      const remix = await ItineraryModel.create({
+        ownerId: new Types.ObjectId(req.userId),
+        anonymousSessionId: null,
+        title: source.title,
+        summary: source.summary,
+        destination: source.destination,
+        durationDays: source.durationDays,
+        budgetTier: source.budgetTier,
+        tripType: source.tripType,
+        vibeTags: source.vibeTags,
+        visibility: "private",
+        coverImageUrl: source.coverImageUrl,
+        sourceItineraryId: source._id,
+        days: source.days.map((d) => ({
+          dayNumber: d.dayNumber,
+          title: d.title,
+          items: d.items.map((it) => ({
+            itemId: it.itemId,
+            category: it.category,
+            name: it.name,
+            area: it.area,
+            description: it.description,
+            timeSlot: it.timeSlot,
+            notes: it.notes ?? "",
+            sourceType: it.sourceType,
+          })),
+        })),
+      });
+      await ItineraryModel.updateOne({ _id: source._id }, { $inc: { remixCount: 1 } });
+
+      const itinerary = await enrichItinerary(remix, req.userId!);
+      res.status(201).json({ itinerary });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+itinerariesRouter.post(
   "/:id/invites",
   requireAuth,
   async (req: AuthenticatedRequest, res, next) => {

@@ -45,7 +45,10 @@ export default function ItineraryDetailScreen() {
   const [creatingInvite, setCreatingInvite] = useState(false);
   const [copiedToken, setCopiedToken] = useState<string | null>(null);
 
+  const [remixing, setRemixing] = useState(false);
+
   const isOwner = !!itinerary && !!user && itinerary.ownerId === user.id;
+  const canRemix = !!itinerary && !isOwner && itinerary.visibility === "public";
 
   useEffect(() => {
     if (!id) return;
@@ -235,6 +238,23 @@ export default function ItineraryDetailScreen() {
     }
   }
 
+  async function handleRemix() {
+    if (!itinerary) return;
+    if (!user) {
+      router.push("/(auth)/signup");
+      return;
+    }
+    setRemixing(true);
+    try {
+      const res = await api.remixItinerary(itinerary.id);
+      router.replace({ pathname: "/itinerary/[id]", params: { id: res.itinerary.id } });
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not remix trip.");
+    } finally {
+      setRemixing(false);
+    }
+  }
+
   async function handleShareInvite(url: string, token: string) {
     try {
       if (Platform.OS === "web") {
@@ -297,6 +317,26 @@ export default function ItineraryDetailScreen() {
         </Pressable>
       ) : null}
 
+      {itinerary.remixedFrom ? (
+        <Pressable
+          onPress={() =>
+            router.push({
+              pathname: "/itinerary/[id]",
+              params: { id: itinerary.remixedFrom!.id },
+            })
+          }
+          style={styles.remixBadge}
+        >
+          <Text style={styles.remixBadgeText}>
+            REMIXED FROM {itinerary.remixedFrom.ownerUsername
+              ? `@${itinerary.remixedFrom.ownerUsername}`
+              : "original"}
+            {" · "}
+            {itinerary.remixedFrom.title}
+          </Text>
+        </Pressable>
+      ) : null}
+
       {error ? <Text style={styles.error}>{error}</Text> : null}
 
       <ItineraryView itinerary={itinerary} />
@@ -313,7 +353,18 @@ export default function ItineraryDetailScreen() {
           onPress={handleSaveToggle}
         />
         <EngagementButton label={`▢ ${itinerary.commentCount}`} active={false} onPress={() => {}} />
+        {itinerary.remixCount > 0 ? (
+          <EngagementButton label={`⟳ ${itinerary.remixCount}`} active={false} onPress={() => {}} />
+        ) : null}
       </View>
+
+      {canRemix ? (
+        <Button
+          label={remixing ? "Remixing…" : "Remix into my library"}
+          onPress={handleRemix}
+          loading={remixing}
+        />
+      ) : null}
 
       {isOwner ? (
         <View style={styles.invitesCard}>
@@ -464,6 +515,13 @@ const styles = StyleSheet.create({
   meta: { ...type.caption, color: colors.inkMuted },
   error: { ...type.body, color: colors.danger },
   byline: { ...type.caption, color: colors.accent, letterSpacing: 1.5 },
+  remixBadge: {
+    backgroundColor: colors.accentSoft,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  remixBadgeText: { ...type.caption, color: colors.ink, letterSpacing: 1 },
   engagement: { flexDirection: "row", gap: spacing.sm },
   engagementBtn: {
     paddingHorizontal: spacing.md,

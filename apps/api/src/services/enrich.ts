@@ -18,11 +18,24 @@ export async function enrichItineraries(
 ): Promise<Itinerary[]> {
   if (docs.length === 0) return [];
 
-  const ownerIds = Array.from(
+  const sourceIds = Array.from(
     new Set(
       docs
-        .map((d) => asId(d.ownerId))
+        .map((d) => asId(d.sourceItineraryId))
         .filter((v): v is string => Boolean(v)),
+    ),
+  );
+  const sources = sourceIds.length
+    ? await ItineraryModel.find({ _id: { $in: sourceIds } }).select("ownerId title")
+    : [];
+  const sourceMap = new Map(sources.map((s) => [s._id.toString(), s]));
+
+  const ownerIds = Array.from(
+    new Set(
+      [
+        ...docs.map((d) => asId(d.ownerId)),
+        ...sources.map((s) => asId(s.ownerId)),
+      ].filter((v): v is string => Boolean(v)),
     ),
   );
   const owners = ownerIds.length
@@ -45,6 +58,10 @@ export async function enrichItineraries(
   return docs.map((doc) => {
     const ownerId = asId(doc.ownerId);
     const owner = ownerId ? ownerMap.get(ownerId) : undefined;
+    const sourceId = asId(doc.sourceItineraryId);
+    const source = sourceId ? sourceMap.get(sourceId) : undefined;
+    const sourceOwnerId = source ? asId(source.ownerId) : null;
+    const sourceOwner = sourceOwnerId ? ownerMap.get(sourceOwnerId) : undefined;
     return toPublicItinerary(doc, {
       owner: owner
         ? { id: ownerId!, username: owner.username, displayName: owner.displayName }
@@ -55,6 +72,14 @@ export async function enrichItineraries(
             savedByMe: savedSet.has(doc._id.toString()),
           }
         : undefined,
+      remixedFrom: source
+        ? {
+            id: sourceId!,
+            title: source.title,
+            ownerUsername: sourceOwner?.username,
+            ownerDisplayName: sourceOwner?.displayName,
+          }
+        : null,
     });
   });
 }

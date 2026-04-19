@@ -60,6 +60,8 @@ export interface Itinerary {
   visibility: Visibility;
   isFeatured: boolean;
   sourceItineraryId: string | null;
+  remixedFrom: RemixSource | null;
+  remixCount: number;
   days: ItineraryDay[];
   summary: string;
   coverImageUrl?: string;
@@ -70,4 +72,15 @@ export interface Itinerary {
   savedByMe?: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface RemixSource {
+  id: string;
+  title: string;
+  ownerUsername?: string;
+  ownerDisplayName?: string;
+}
+
+export interface RemixItineraryResponse {
+  itinerary: Itinerary;
 }

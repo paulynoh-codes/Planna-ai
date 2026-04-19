@@ -16,6 +16,7 @@ import {
   type ListItinerariesResponse,
   type LoginRequest,
   type ProfileResponse,
+  type RemixItineraryResponse,
   type ResolveInviteResponse,
   type SignupRequest,
   type ToggleResponse,
@@ -164,5 +165,10 @@ export const api = {
   },
   resolveInvite(token: string) {
     return request<ResolveInviteResponse>(`/api/invites/${encodeURIComponent(token)}`);
+  },
+
+  // Phase 4: remix
+  remixItinerary(id: string) {
+    return request<RemixItineraryResponse>(`/api/itineraries/${id}/remix`, { method: "POST" });
   },
 };
